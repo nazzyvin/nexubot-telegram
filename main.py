@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 
 from aiohttp import web
@@ -46,7 +47,7 @@ load_dotenv()
 token = os.getenv('TOKEN')
 
 
-if __name__ == '__main__':
+async def main():
     app = (
         Application.builder()
         .token(token)
@@ -81,14 +82,38 @@ if __name__ == '__main__':
 
     app.job_queue.run_repeating(purge_job, interval=3600, first=30)
 
+    # --- Health check server (for Railway) ---
     async def health(request):
         return web.Response(text="OK")
 
-    runner = web.AppRunner(web.Application())
-    runner.app.router.add_get('/health', health)
+    health_app = web.Application()
+    health_app.router.add_get('/health', health)
+
+    runner = web.AppRunner(health_app)
     await runner.setup()
     port = int(os.getenv('PORT', 8080))
-    await web.TCPSite(runner, '0.0.0.0', port).start()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
     logger.info(f"Healthcheck server started on port {port}")
 
-    app.run_polling(poll_interval=5)
+    # --- Bot lifecycle (manual, since we're already inside an event loop) ---
+    async with app:
+        await app.start()
+        await app.updater.start_polling(poll_interval=5)
+        logger.info("Bot polling started")
+
+        try:
+            # Keep the process alive until cancelled (Ctrl+C / container stop)
+            await asyncio.Event().wait()
+        finally:
+            logger.info("Shutting down...")
+            await app.updater.stop()
+            await app.stop()
+            await runner.cleanup()
+
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
