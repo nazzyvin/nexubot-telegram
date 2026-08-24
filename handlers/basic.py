@@ -23,14 +23,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎲 Games
 /roll <NdM> - Roll dice (e.g. 2d6)
-/choose <a> <b> ... - Pick a random option
-/ttt @user - TicTacToe
-/connect4 @user - Connect 4
+/choose <option1> <option2> ... - Pick a random option
+/ttt <@user> - TicTacToe
+/connect4 <@user> - Connect 4
 /games - Show active game
 
 ⚙️ Utility
 /ping - Check bot latency
-/save <time> - Store replied media (reply to it)
+/save [time] - Store replied media (reply to it)
 /get <code> - Retrieve stored media
 /del <code> - Delete stored media
 /mylist - Show my saved codes
