@@ -116,11 +116,17 @@ async def get_welcome(chat_id: int) -> Optional[str]:
         return None
 
 
-async def delete_media(code: str) -> bool:
+async def delete_media(code: str, owner_id: int = None) -> bool:
     assert _pool is not None
     async with _pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM vault WHERE code = $1",
-            code
-        )
+        if owner_id is not None:
+            result = await conn.execute(
+                "DELETE FROM vault WHERE upper(code) = $1 AND owner_id = $2",
+                code.upper(), owner_id
+            )
+        else:
+            result = await conn.execute(
+                "DELETE FROM vault WHERE upper(code) = $1",
+                code.upper()
+            )
         return result == "DELETE 1"

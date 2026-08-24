@@ -104,10 +104,11 @@ async def get_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"del_command called by user_id={update.effective_user.id} with args={context.args}")
     if not context.args:
         await update.message.reply_text("Usage: /del <code>")
         return
-    if await storage.delete_media(context.args[0]):
+    if await storage.delete_media(context.args[0], update.effective_user.id):
         await update.message.reply_text("🗑 Deleted.")
     else:
         await update.message.reply_text("❌ Not found.")
