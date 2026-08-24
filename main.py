@@ -42,6 +42,15 @@ async def on_shutdown(app):
     logger.info("PostgreSQL pool closed")
 
 
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception while processing update:", exc_info=context.error)
+    if isinstance(update, object) and hasattr(update, "effective_message") and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Something went wrong handling that command.")
+        except Exception:
+            pass
+
+
 load_dotenv()
 
 token = os.getenv('TOKEN')
@@ -51,8 +60,6 @@ async def main():
     app = (
         Application.builder()
         .token(token)
-        .post_init(on_startup)
-        .post_shutdown(on_shutdown)
         .build()
     )
 
@@ -81,6 +88,7 @@ async def main():
         app.add_handler(h)
 
     app.job_queue.run_repeating(purge_job, interval=3600, first=30)
+    app.add_error_handler(on_error)
 
     # --- Health check server (for Railway) ---
     async def health(request):
@@ -97,7 +105,11 @@ async def main():
     logger.info(f"Healthcheck server started on port {port}")
 
     # --- Bot lifecycle (manual, since we're already inside an event loop) ---
+    # NOTE: post_init/post_shutdown builder hooks are NOT called under manual
+    # lifecycle (async with app / app.start()) — those only fire inside
+    # run_polling()/run_webhook(). So we call on_startup/on_shutdown ourselves.
     async with app:
+        await on_startup(app)
         await app.start()
         await app.updater.start_polling(poll_interval=5)
         logger.info("Bot polling started")
@@ -109,6 +121,7 @@ async def main():
             logger.info("Shutting down...")
             await app.updater.stop()
             await app.stop()
+            await on_shutdown(app)
             await runner.cleanup()
 
 
