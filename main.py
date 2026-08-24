@@ -1,6 +1,7 @@
 import os
 import logging
 
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler
 
@@ -79,5 +80,15 @@ if __name__ == '__main__':
         app.add_handler(h)
 
     app.job_queue.run_repeating(purge_job, interval=3600, first=30)
+
+    async def health(request):
+        return web.Response(text="OK")
+
+    runner = web.AppRunner(web.Application())
+    runner.app.router.add_get('/health', health)
+    await runner.setup()
+    port = int(os.getenv('PORT', 8080))
+    await web.TCPSite(runner, '0.0.0.0', port).start()
+    logger.info(f"Healthcheck server started on port {port}")
 
     app.run_polling(poll_interval=5)
