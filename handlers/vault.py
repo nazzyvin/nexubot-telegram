@@ -74,7 +74,7 @@ async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ttl is None:
             await msg.reply_text("Bad duration. Use e.g. 30m, 12h, 7d — or omit for forever.")
             return
-    code = storage.save_media(update.effective_user.id, file_id, kind, ttl)
+    code = await storage.save_media(update.effective_user.id, file_id, kind, ttl)
     await msg.reply_text(f"💾 Saved ({kind}).\nCode: {code}\nExpiry: {format_expiry(time.time() + ttl if ttl else None)}")
 
 
@@ -83,7 +83,7 @@ async def get_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /get <code>")
         return
-    row = storage.get_media(context.args[0])
+    row = await storage.get_media(context.args[0])
     if row is None:
         await update.message.reply_text("❌ Not found (or expired).")
         return
@@ -99,7 +99,7 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /del <code>")
         return
-    if storage.delete_media(context.args[0]):
+    if await storage.delete_media(context.args[0]):
         await update.message.reply_text("🗑 Deleted.")
     else:
         await update.message.reply_text("❌ Not found.")
@@ -107,7 +107,7 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def mylist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = storage.list_media(update.effective_user.id)
+    rows = await storage.list_media(update.effective_user.id)
     if not rows:
         await update.message.reply_text("Vault is empty.")
         return
