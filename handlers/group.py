@@ -49,17 +49,20 @@ async def welcome_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.my_chat_member:
+    message = update.message
+    if not message or not message.new_chat_members:
         return
-    change = update.my_chat_member
-    if change.new_chat_member.status == 'member' and change.old_chat_member.status == 'left':
-        # New member joined
-        welcome = await storage.get_welcome(change.chat.id)
-        if welcome:
-            name = change.new_chat_member.user.full_name
-            username = change.new_chat_member.user.username or ""
-            text = welcome.replace('{name}', name).replace('{username}', f"@{username}").replace('{first_name}', change.new_chat_member.user.first_name)
-            await context.bot.send_message(change.chat.id, text)
+    welcome = await storage.get_welcome(message.chat.id)
+    if not welcome:
+        return
+    for new_user in message.new_chat_members:
+        if new_user.id == context.bot.id:
+            # The bot itself was added to the group — not a member to welcome.
+            continue
+        name = new_user.full_name
+        username = new_user.username or ""
+        text = welcome.replace('{name}', name).replace('{username}', f"@{username}").replace('{first_name}', new_user.first_name)
+        await context.bot.send_message(message.chat.id, text)
 
 
 MENTION_RE = re.compile(r'@(\w+)')

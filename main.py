@@ -77,6 +77,7 @@ async def main():
     # Vault (owner-only)
     app.add_handler(CommandHandler('save', save_command))
     app.add_handler(CommandHandler('get', get_command))
+    app.add_handler(CommandHandler('del', del_command))
     app.add_handler(CommandHandler('mylist', mylist_command))
 
     # Games
