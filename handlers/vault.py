@@ -2,13 +2,17 @@ import functools
 import os
 import re
 import time
+import logging
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from services import storage
 
+logger = logging.getLogger(__name__)
+
 OWNER_ID = int(os.getenv('OWNER_ID', '0'))
+logger.info(f"Vault handler loaded with OWNER_ID={OWNER_ID}")
 
 DURATION_RE = re.compile(r'^(\d+)([mhd])$', re.IGNORECASE)
 UNITS = {'m': 60, 'h': 3600, 'd': 86400}
@@ -18,10 +22,13 @@ def owner_only(func):
     @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
+        logger.info(f"owner_only check: user_id={user.id if user else None}, OWNER_ID={OWNER_ID}")
         if user is None or user.id != OWNER_ID:
+            logger.warning(f"Access denied for user_id={user.id if user else None}")
             if update.effective_message:
                 await update.effective_message.reply_text("🔒 Private storage. Owner-only feature.")
             return
+        logger.info(f"Access granted for user_id={user.id}")
         return await func(update, context)
     return wrapper
 
@@ -59,6 +66,7 @@ def extract_media(message):
 
 @owner_only
 async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"save_command called by user_id={update.effective_user.id}")
     msg = update.message
     target = msg.reply_to_message
     if target is None:
@@ -107,6 +115,7 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def mylist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"mylist_command called by user_id={update.effective_user.id}")
     rows = await storage.list_media(update.effective_user.id)
     if not rows:
         await update.message.reply_text("Vault is empty.")
