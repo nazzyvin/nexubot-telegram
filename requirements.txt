@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]==22.8
+python-dotenv==1.2.3
+pillow>=11.3.0
+imageio-ffmpeg==0.6.0
+asyncpg==0.31.0
