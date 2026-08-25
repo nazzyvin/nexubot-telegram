@@ -48,7 +48,7 @@ class TicTacToe(GameBase):
         super().__init__(chat_id, players)
         self.board = [None] * 9
 
-    def render_keyboard(self) -> InlineKeyboardMarkup:
+    def render_keyboard(self, show_forfeit: bool = True) -> InlineKeyboardMarkup:
         rows = []
         for row in range(3):
             buttons = []
@@ -60,7 +60,8 @@ class TicTacToe(GameBase):
                     text, callback_data=f"ttt:{self.game_id}:{idx}"
                 ))
             rows.append(buttons)
-        rows.append([InlineKeyboardButton("🏳️ Forfeit", callback_data=f"forfeit:{self.game_id}")])
+        if show_forfeit:
+            rows.append([InlineKeyboardButton("🏳️ Forfeit", callback_data=f"forfeit:{self.game_id}")])
         return InlineKeyboardMarkup(rows)
 
     def make_move(self, pos: int, player_idx: int) -> bool:
@@ -87,7 +88,7 @@ class Connect4(GameBase):
         super().__init__(chat_id, players)
         self.board = [[None for _ in range(self.COLS)] for _ in range(self.ROWS)]
 
-    def render_keyboard(self) -> InlineKeyboardMarkup:
+    def render_keyboard(self, show_forfeit: bool = True) -> InlineKeyboardMarkup:
         rows = []
         # Column selector (top row)
         col_buttons = []
@@ -106,7 +107,8 @@ class Connect4(GameBase):
                 text = "⚪" if val is None else ("🔴" if val == 0 else "🟡")
                 btn_row.append(InlineKeyboardButton(text, callback_data=f"c4:{self.game_id}:{col}"))
             rows.append(btn_row)
-        rows.append([InlineKeyboardButton("🏳️ Forfeit", callback_data=f"forfeit:{self.game_id}")])
+        if show_forfeit:
+            rows.append([InlineKeyboardButton("🏳️ Forfeit", callback_data=f"forfeit:{self.game_id}")])
         return InlineKeyboardMarkup(rows)
 
     def make_move(self, col: int, player_idx: int) -> bool:
@@ -400,7 +402,10 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             winner = game.check_winner()
             if winner is not None:
                 text = await _finish_game(chat_id, game, winner, context)
-                await query.edit_message_text(text, parse_mode="HTML")
+                await query.edit_message_text(
+                    text, parse_mode="HTML",
+                    reply_markup=game.render_keyboard(show_forfeit=False)
+                )
                 del GAMES[chat_id]
             else:
                 game.next_turn()
@@ -419,7 +424,10 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             winner = game.check_winner()
             if winner is not None:
                 text = await _finish_game(chat_id, game, winner, context)
-                await query.edit_message_text(text, parse_mode="HTML")
+                await query.edit_message_text(
+                    text, parse_mode="HTML",
+                    reply_markup=game.render_keyboard(show_forfeit=False)
+                )
                 del GAMES[chat_id]
             else:
                 game.next_turn()
@@ -456,7 +464,10 @@ async def forfeit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = await _finish_forfeit(chat_id, game, player_idx, context)
-    await query.edit_message_text(text, parse_mode="HTML")
+    await query.edit_message_text(
+        text, parse_mode="HTML",
+        reply_markup=game.render_keyboard(show_forfeit=False)
+    )
     del GAMES[chat_id]
 
 
@@ -476,11 +487,13 @@ async def forfeit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = await _finish_forfeit(chat_id, game, player_idx, context)
+    final_keyboard = game.render_keyboard(show_forfeit=False)
     del GAMES[chat_id]
 
-    # Try to edit the original board message so it doesn't sit there with a
-    # now-defunct keyboard. Fall back to a plain reply if that message is
-    # gone or otherwise can't be edited.
+    # Try to edit the original board message so the final position stays
+    # visible with the win/forfeit banner, instead of vanishing into plain
+    # text. Fall back to a plain reply if that message is gone or otherwise
+    # can't be edited.
     edited = False
     if game.message_id is not None:
         try:
@@ -489,13 +502,14 @@ async def forfeit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=game.message_id,
                 text=text,
                 parse_mode="HTML",
+                reply_markup=final_keyboard,
             )
             edited = True
         except Exception:
             pass
 
     if not edited:
-        await update.message.reply_text(text, parse_mode="HTML")
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=final_keyboard)
 
 
 def get_game_handlers():
