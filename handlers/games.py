@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
 
+from services import storage
+
 # In-memory registries
 GAMES: Dict[int, 'GameBase'] = {}           # chat_id -> active game
 PENDING: Dict[int, dict] = {}               # chat_id -> pending challenge
@@ -58,6 +60,7 @@ class TicTacToe(GameBase):
                     text, callback_data=f"ttt:{self.game_id}:{idx}"
                 ))
             rows.append(buttons)
+        rows.append([InlineKeyboardButton("🏳️ Forfeit", callback_data=f"forfeit:{self.game_id}")])
         return InlineKeyboardMarkup(rows)
 
     def make_move(self, pos: int, player_idx: int) -> bool:
@@ -93,14 +96,17 @@ class Connect4(GameBase):
             text = f"{col+1}" if not full else "⛔"
             col_buttons.append(InlineKeyboardButton(text, callback_data=f"c4:{self.game_id}:{col}"))
         rows.append(col_buttons)
-        # Visual board rows
+        # Visual board rows — every cell in a column shares the column's
+        # callback_data, so tapping anywhere in the column drops a piece there
+        # (not just the small number button up top).
         for row in range(self.ROWS):
             btn_row = []
             for col in range(self.COLS):
                 val = self.board[row][col]
                 text = "⚪" if val is None else ("🔴" if val == 0 else "🟡")
-                btn_row.append(InlineKeyboardButton(text, callback_data="ignore"))
+                btn_row.append(InlineKeyboardButton(text, callback_data=f"c4:{self.game_id}:{col}"))
             rows.append(btn_row)
+        rows.append([InlineKeyboardButton("🏳️ Forfeit", callback_data=f"forfeit:{self.game_id}")])
         return InlineKeyboardMarkup(rows)
 
     def make_move(self, col: int, player_idx: int) -> bool:
@@ -153,6 +159,21 @@ async def games_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Active: {type(g).__name__} (ID: {g.game_id})", parse_mode="HTML")
     else:
         await update.message.reply_text("No active game.")
+
+
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    rows = await storage.get_leaderboard(chat_id)
+    if not rows:
+        await update.message.reply_text("No game results recorded yet in this chat. Go play some /ttt or /connect4!")
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 <b>Leaderboard</b>"]
+    for i, (name, wins, losses, draws) in enumerate(rows):
+        prefix = medals[i] if i < len(medals) else f"{i+1}."
+        lines.append(f"{prefix} {name} — {wins}W {losses}L {draws}D")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 # ---------- Internals ----------
@@ -275,6 +296,7 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Create game
     game = GameClass(chat_id, [challenger_id, opponent_id])
+    game.message_id = query.message.message_id
     GAMES[chat_id] = game
 
     # Send game board
@@ -286,6 +308,60 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard,
         parse_mode="HTML"
     )
+
+
+async def _display_name(context: ContextTypes.DEFAULT_TYPE, chat_id: int, uid: int) -> str:
+    try:
+        member = await context.bot.get_chat_member(chat_id, uid)
+        return member.user.full_name
+    except Exception:
+        return f"Player {uid}"
+
+
+async def _finish_game(chat_id: int, game: GameBase, winner: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Builds the end-of-game text and records the result to Postgres.
+    Never lets a stats-recording failure block the game-over message."""
+    p0_id, p1_id = game.players
+
+    try:
+        if winner == -1:
+            name0 = await _display_name(context, chat_id, p0_id)
+            name1 = await _display_name(context, chat_id, p1_id)
+            await storage.record_result(chat_id, p0_id, name0, 'draw')
+            await storage.record_result(chat_id, p1_id, name1, 'draw')
+            return "🤝 It's a draw!"
+        else:
+            winner_id = game.players[winner]
+            loser_id = game.players[1 - winner]
+            winner_name = await _display_name(context, chat_id, winner_id)
+            loser_name = await _display_name(context, chat_id, loser_id)
+            await storage.record_result(chat_id, winner_id, winner_name, 'win')
+            await storage.record_result(chat_id, loser_id, loser_name, 'loss')
+            return f"🎉 {winner_name} wins!"
+    except Exception:
+        # Stats recording is best-effort — a DB hiccup shouldn't break the game.
+        if winner == -1:
+            return "🤝 It's a draw!"
+        return f"🎉 Player {winner+1} wins!"
+
+
+async def _finish_forfeit(chat_id: int, game: GameBase, forfeiting_idx: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Same idea as _finish_game, but for a player bailing out early.
+    The other player is credited a win, the forfeiter a loss."""
+    winner_idx = 1 - forfeiting_idx
+    winner_id = game.players[winner_idx]
+    loser_id = game.players[forfeiting_idx]
+
+    winner_name = await _display_name(context, chat_id, winner_id)
+    loser_name = await _display_name(context, chat_id, loser_id)
+
+    try:
+        await storage.record_result(chat_id, winner_id, winner_name, 'win')
+        await storage.record_result(chat_id, loser_id, loser_name, 'loss')
+    except Exception:
+        pass  # stats recording is best-effort — don't block the forfeit message
+
+    return f"🏳️ {loser_name} forfeited. {winner_name} wins by default!"
 
 
 async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,10 +399,7 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if game.make_move(pos, player_idx):
             winner = game.check_winner()
             if winner is not None:
-                if winner == -1:
-                    text = "🤝 It's a draw!"
-                else:
-                    text = f"🎉 Player {winner+1} wins!"
+                text = await _finish_game(chat_id, game, winner, context)
                 await query.edit_message_text(text, parse_mode="HTML")
                 del GAMES[chat_id]
             else:
@@ -336,14 +409,16 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=game.render_keyboard(),
                     parse_mode="HTML"
                 )
+        else:
+            if game.turn != player_idx:
+                await query.answer("Not your turn.")
+            else:
+                await query.answer("That square is taken.")
     elif prefix == "c4":
         if game.make_move(pos, player_idx):
             winner = game.check_winner()
             if winner is not None:
-                if winner == -1:
-                    text = "🤝 It's a draw!"
-                else:
-                    text = f"🎉 Player {winner+1} wins!"
+                text = await _finish_game(chat_id, game, winner, context)
                 await query.edit_message_text(text, parse_mode="HTML")
                 del GAMES[chat_id]
             else:
@@ -353,6 +428,74 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=game.render_keyboard(),
                     parse_mode="HTML"
                 )
+        else:
+            if game.turn != player_idx:
+                await query.answer("Not your turn.")
+            else:
+                await query.answer("That column is full — pick another.")
+
+
+async def forfeit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 🏳️ Forfeit button on the game keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    game_id = data.split(':', 1)[1] if ':' in data else None
+    chat_id = query.message.chat_id
+
+    game = GAMES.get(chat_id)
+    if not game or game.game_id != game_id:
+        await query.answer("Game not found or expired.")
+        return
+
+    user_id = query.from_user.id
+    player_idx = 0 if game.players[0] == user_id else (1 if game.players[1] == user_id else -1)
+    if player_idx == -1:
+        await query.answer("Not your game.")
+        return
+
+    text = await _finish_forfeit(chat_id, game, player_idx, context)
+    await query.edit_message_text(text, parse_mode="HTML")
+    del GAMES[chat_id]
+
+
+async def forfeit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /forfeit and /quit — lets a player bail without hunting for the button."""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    game = GAMES.get(chat_id)
+    if not game:
+        await update.message.reply_text("No active game in this chat.")
+        return
+
+    player_idx = 0 if game.players[0] == user.id else (1 if game.players[1] == user.id else -1)
+    if player_idx == -1:
+        await update.message.reply_text("You're not part of the active game here.")
+        return
+
+    text = await _finish_forfeit(chat_id, game, player_idx, context)
+    del GAMES[chat_id]
+
+    # Try to edit the original board message so it doesn't sit there with a
+    # now-defunct keyboard. Fall back to a plain reply if that message is
+    # gone or otherwise can't be edited.
+    edited = False
+    if game.message_id is not None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=game.message_id,
+                text=text,
+                parse_mode="HTML",
+            )
+            edited = True
+        except Exception:
+            pass
+
+    if not edited:
+        await update.message.reply_text(text, parse_mode="HTML")
 
 
 def get_game_handlers():
@@ -360,6 +503,10 @@ def get_game_handlers():
         CommandHandler('ttt', tictactoe_command),
         CommandHandler('connect4', connect4_command),
         CommandHandler('games', games_command),
+        CommandHandler('leaderboard', leaderboard_command),
+        CommandHandler('forfeit', forfeit_command),
+        CommandHandler('quit', forfeit_command),
         CallbackQueryHandler(join_callback, pattern=r'^join:(ttt|c4)$|^decline$'),
         CallbackQueryHandler(game_callback, pattern=r'^(ttt|c4):'),
+        CallbackQueryHandler(forfeit_callback, pattern=r'^forfeit:'),
     ]

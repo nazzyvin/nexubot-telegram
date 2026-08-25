@@ -23,10 +23,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎲 Games
 /roll <NdM> - Roll dice (e.g. 2d6)
-/choose <option1> <option2> ... - Pick a random option
+/choose <a> <b> ... - Pick a random option
 /ttt <@user> - TicTacToe
 /connect4 <@user> - Connect 4
 /games - Show active game
+/forfeit (or /quit) - Give up your active game
+/leaderboard - Show this chat's game leaderboard
 
 ⚙️ Utility
 /ping - Check bot latency
@@ -43,5 +45,3 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     latency = max(0, round((time.time() - update.message.date.timestamp()) * 1000))
     await update.message.reply_text(f"🏓 Pong! {latency}ms")
-
-
