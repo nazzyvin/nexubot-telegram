@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
+from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from services import storage
 
@@ -11,6 +11,8 @@ from services import storage
 GAMES: Dict[int, 'GameBase'] = {}           # chat_id -> active game
 PENDING: Dict[int, dict] = {}               # chat_id -> pending challenge
 
+CHALLENGE_TIMEOUT_SECONDS = 5 * 60  # auto-expire an unanswered challenge after 5 minutes
+BOARD_BUMP_THRESHOLD = 7            # re-post (vs. edit in place) once this many other messages land in the chat
 
 @dataclass
 class GameBase:
@@ -19,6 +21,7 @@ class GameBase:
     turn: int = 0               # 0 or 1
     board: List = field(default_factory=list)
     message_id: Optional[int] = None
+    messagge_since_board: int = 0   # chat messages seen since the board was last (re)posted
     game_id: str = field(default_factory=lambda: ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=6)))
 
     def current_player(self) -> int:
@@ -240,11 +243,43 @@ async def _start_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE, g
         InlineKeyboardButton("❌ Decline", callback_data="decline"),
     ]])
     
-    await update.message.reply_text(
+    sent = await update.message.reply_text(
         f"{user.first_name} challenged {opponent_display} to {gtype.upper()}!\n"
         f"Tap \"Join Game\" to accept.",
         reply_markup=keyboard
     )
+
+    PENDING[chat_id]['message_id'] = sent.message_id
+
+    if context.job_queue is not None:
+        job = context.job_queue.run_once(
+            _expire_challenge,
+            CHALLENGE_TIMEOUT_SECONDS,
+            chat_id=chat_id,
+            data={'chat_id': chat_id, 'message_id': sent.message_id},
+        )
+        PENDING[chat_id]['timeout_job'] = job
+
+
+async def _expire_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled ~5 minutes after a challenge is posted. No-ops if the challenge was already joined/declined, or replaced by a newer one."""
+    job = context.job
+    chat_id = job.chat_id
+    message_id = job.data.get('message_id')
+
+    pending = PENDING.get(chat_id)
+    if not pending or pending.get('message_id') != message_id:
+        return  # already resolve, or this is a stale job for an old challenge
+
+    del PENDING[chat_id]
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="⌛ Challenge expired — no response within 5 minutes.",
+        )
+    except Exception:
+        pass
 
 
 async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -256,7 +291,11 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
 
     if data == "decline":
-        if chat_id in PENDING:
+        pending = PENDING.get(chat_id)
+        if pending:
+            job = pending.get('timeout_job')
+            if job is not None:
+                job.schedule_removal()
             del PENDING[chat_id]
         await query.edit_message_text("Challenge declined.")
         return
@@ -294,6 +333,9 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     opponent_id = user.id
 
     # Clean up pending
+    timeout_job = pending.get('timeout_job')
+    if timeout_job is not None:
+        timeout_job.schedule_removal()
     del PENDING[chat_id]
 
     # Create game
@@ -366,6 +408,60 @@ async def _finish_forfeit(chat_id: int, game: GameBase, forfeiting_idx: int, con
     return f"🏳️ {loser_name} forfeited. {winner_name} wins by default!"
 
 
+async def _update_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int, game: GameBase, text: str, keyboard: InlineKeyboardMarkup, force_repost: bool = False):
+    """Updates the board message. If the chat's been quiet since the last
+    board post, this just edits it in place (cheap, no extra clutter). If
+    BOARD_BUMP_THRESHOLD other messages have landed since then — or
+    force_repost is set, e.g. for the final win/draw/forfeit message — it
+    strips the old message's buttons and posts a fresh one instead, so the
+    board bumps back to the bottom of the chat where people are looking."""
+    should_repost = (
+        force_repost
+        or game.message_id is None
+        or game.messages_since_board >= BOARD_BUMP_THRESHOLD
+    )
+
+    if not should_repost:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=game.message_id,
+                text=text, reply_markup=keyboard, parse_mode="HTML",
+            )
+            return
+        except Exception:
+            pass  # old message gone/uneditable — fall through to a fresh repost
+
+    old_message_id = game.message_id
+    if old_message_id is not None:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=old_message_id, reply_markup=None
+            )
+        except Exception:
+            pass  # old message may be too old / already gone — not fatal
+
+    sent = await context.bot.send_message(
+        chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode="HTML"
+    )
+    game.message_id = sent.message_id
+    game.messages_since_board = 0
+
+
+async def _track_chat_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Counts other chat messages while a game is active, so _update_board
+    knows when the chat's been busy enough to warrant bumping the board back
+    to the bottom instead of a quiet in-place edit."""
+    chat = update.effective_chat
+    if chat is None:
+        return
+    game = GAMES.get(chat.id)
+    if game is not None:
+        game.messages_since_board += 1
+
+
+def get_activity_tracker_handler():
+    return MessageHandler(filters.ALL, _track_chat_activity)
+
 async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -402,18 +498,11 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             winner = game.check_winner()
             if winner is not None:
                 text = await _finish_game(chat_id, game, winner, context)
-                await query.edit_message_text(
-                    text, parse_mode="HTML",
-                    reply_markup=game.render_keyboard(show_forfeit=False)
-                )
+                await _update_board(context, chat_id, game, text, game.render_keyboard(show_forfeit=False))
                 del GAMES[chat_id]
             else:
                 game.next_turn()
-                await query.edit_message_text(
-                    game.get_status_text(),
-                    reply_markup=game.render_keyboard(),
-                    parse_mode="HTML"
-                )
+                await _update_board(context, chat_id, game, game.get_status_text(), game.render_keyboard())
         else:
             if game.turn != player_idx:
                 await query.answer("Not your turn.")
@@ -424,18 +513,11 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             winner = game.check_winner()
             if winner is not None:
                 text = await _finish_game(chat_id, game, winner, context)
-                await query.edit_message_text(
-                    text, parse_mode="HTML",
-                    reply_markup=game.render_keyboard(show_forfeit=False)
-                )
+                await _update_board(context, chat_id, game, text, game.render_keyboard(show_forfeit=False))
                 del GAMES[chat_id]
             else:
                 game.next_turn()
-                await query.edit_message_text(
-                    game.get_status_text(),
-                    reply_markup=game.render_keyboard(),
-                    parse_mode="HTML"
-                )
+                await _update_board(context, chat_id, game, game.get_status_text(), game.render_keyboard())
         else:
             if game.turn != player_idx:
                 await query.answer("Not your turn.")
@@ -464,10 +546,7 @@ async def forfeit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = await _finish_forfeit(chat_id, game, player_idx, context)
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=game.render_keyboard(show_forfeit=False)
-    )
+    await query.edit_message_text(context, chat_id, game, text, reply_markup=game.render_keyboard(show_forfeit=False))
     del GAMES[chat_id]
 
 
@@ -488,29 +567,8 @@ async def forfeit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = await _finish_forfeit(chat_id, game, player_idx, context)
     final_keyboard = game.render_keyboard(show_forfeit=False)
+    await _update_board(context, chat_id, game, text, final_keyboard)
     del GAMES[chat_id]
-
-    # Try to edit the original board message so the final position stays
-    # visible with the win/forfeit banner, instead of vanishing into plain
-    # text. Fall back to a plain reply if that message is gone or otherwise
-    # can't be edited.
-    edited = False
-    if game.message_id is not None:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=game.message_id,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=final_keyboard,
-            )
-            edited = True
-        except Exception:
-            pass
-
-    if not edited:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=final_keyboard)
-
 
 def get_game_handlers():
     return [

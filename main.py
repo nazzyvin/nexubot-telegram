@@ -13,6 +13,7 @@ from handlers import (
     save_command, get_command, mylist_command, del_command,
     get_game_handlers,
     get_group_handlers,
+    get_activity_tracker_handler,
 )
 from services import storage, init_pool, close_pool
 
@@ -87,6 +88,7 @@ async def main():
     # Group features
     for h in get_group_handlers():
         app.add_handler(h)
+        app.add_handler(get_activity_tracker_handler(), group=1)
 
     app.job_queue.run_repeating(purge_job, interval=3600, first=30)
     app.add_error_handler(on_error)
