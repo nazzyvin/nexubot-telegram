@@ -516,6 +516,7 @@ def get_game_handlers():
     return [
         CommandHandler('ttt', tictactoe_command),
         CommandHandler('connect4', connect4_command),
+        CommandHandler('c4', connect4_command),
         CommandHandler('games', games_command),
         CommandHandler('leaderboard', leaderboard_command),
         CommandHandler('lb', leaderboard_command),
