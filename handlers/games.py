@@ -518,6 +518,7 @@ def get_game_handlers():
         CommandHandler('connect4', connect4_command),
         CommandHandler('games', games_command),
         CommandHandler('leaderboard', leaderboard_command),
+        CommandHandler('lb', leaderboard_command),
         CommandHandler('forfeit', forfeit_command),
         CommandHandler('quit', forfeit_command),
         CallbackQueryHandler(join_callback, pattern=r'^join:(ttt|c4)$|^decline$'),

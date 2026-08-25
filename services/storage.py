@@ -29,6 +29,16 @@ async def init_pool(dsn: str):
                 welcome_text TEXT,
                 welcome_on BOOLEAN DEFAULT TRUE
             );
+            CREATE TABLE IF NOT EXISTS game_results (
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                name TEXT NOT NULL,
+                wins INT DEFAULT 0,
+                losses INT DEFAULT 0,
+                draws INT DEFAULT 0,
+                PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_results_chat ON game_results (chat_id);
         """)
 
 
@@ -130,3 +140,34 @@ async def delete_media(code: str, owner_id: int = None) -> bool:
                 code.upper()
             )
         return result == "DELETE 1"
+
+
+async def record_result(chat_id: int, user_id: int, name: str, result: str):
+    """Record a game result. result: 'win', 'loss', or 'draw'."""
+    assert _pool is not None
+    async with _pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO game_results (chat_id, user_id, name, wins, losses, draws)
+            VALUES ($1, $2, $3, 
+                CASE WHEN $4 = 'win' THEN 1 ELSE 0 END,
+                CASE WHEN $4 = 'loss' THEN 1 ELSE 0 END,
+                CASE WHEN $4 = 'draw' THEN 1 ELSE 0 END)
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                wins = game_results.wins + CASE WHEN EXCLUDED.wins > 0 THEN 1 ELSE 0 END,
+                losses = game_results.losses + CASE WHEN EXCLUDED.losses > 0 THEN 1 ELSE 0 END,
+                draws = game_results.draws + CASE WHEN EXCLUDED.draws > 0 THEN 1 ELSE 0 END
+        """, chat_id, user_id, name, result)
+
+
+async def get_leaderboard(chat_id: int) -> List[Tuple]:
+    """Return list of (name, wins, losses, draws) sorted by wins desc, then losses asc."""
+    assert _pool is not None
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT name, wins, losses, draws
+            FROM game_results
+            WHERE chat_id = $1
+            ORDER BY wins DESC, losses ASC, name ASC
+        """, chat_id)
+        return [(r['name'], r['wins'], r['losses'], r['draws']) for r in rows]
