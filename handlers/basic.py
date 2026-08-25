@@ -5,7 +5,7 @@ from telegram.ext import ContextTypes
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("""🤖 Welcome to NexuBot!
+    await update.message.reply_text("""🤖 Welcome to Nexu-Bot!
 
 Your all-in-one Telegram companion. 🚀
 
