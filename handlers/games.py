@@ -165,17 +165,49 @@ async def _start_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE, g
         await update.message.reply_text("A game is already pending/active here.")
         return
 
-    if not context.args or not context.args[0].startswith('@'):
-        await update.message.reply_text(f"Usage: /{gtype} @opponent")
+    opponent_id = None
+    opponent_username = None
+    opponent_display = None  # what we show in the "X challenged Y" message
+
+    # Prefer a real mention entity — works for tagged users with or without a
+    # public @username. text_mention carries the actual User object (has .id);
+    # plain mention only carries "@username" text, so we fall back to that.
+    for entity in (update.message.entities or []):
+        if entity.type == "text_mention" and entity.user is not None:
+            opponent_id = entity.user.id
+            opponent_username = (entity.user.username or "").lower() or None
+            opponent_display = entity.user.full_name
+            break
+        if entity.type == "mention":
+            mention_text = update.message.parse_entity(entity)  # e.g. "@someuser"
+            opponent_username = mention_text.lstrip('@').lower()
+            opponent_display = mention_text
+            break
+
+    # Fallback: plain "@username" typed as the first arg (no entity attached,
+    # e.g. copy-pasted text).
+    if opponent_id is None and opponent_username is None:
+        if context.args and context.args[0].startswith('@'):
+            opponent_username = context.args[0][1:].lower()
+            opponent_display = f"@{opponent_username}"
+
+    if opponent_id is None and opponent_username is None:
+        await update.message.reply_text(
+            f"Usage: /{gtype} @opponent (tag a user, or type their @username)"
+        )
         return
 
-    opponent_username = context.args[0][1:].lower()
+    if opponent_id == user.id:
+        await update.message.reply_text("You can't challenge yourself.")
+        return
+
     challenger_id = user.id
 
     # Store pending challenge
     PENDING[chat_id] = {
         'challenger_id': challenger_id,
-        'opponent_username': opponent_username,
+        'opponent_id': opponent_id,              # set if we got a real text_mention
+        'opponent_username': opponent_username,   # fallback match key
         'gtype': gtype,
         'GameClass': GameClass,
     }
@@ -186,7 +218,7 @@ async def _start_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE, g
     ]])
     
     await update.message.reply_text(
-        f"{user.first_name} challenged @{opponent_username} to {gtype.upper()}!\n"
+        f"{user.first_name} challenged {opponent_display} to {gtype.upper()}!\n"
         f"Tap \"Join Game\" to accept.",
         reply_markup=keyboard
     )
@@ -214,8 +246,21 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("No pending challenge.")
         return
 
-    # Verify it's the opponent
-    if user.username.lower() != pending['opponent_username']:
+    # Verify it's the opponent — prefer an exact user-id match (from a
+    # text_mention challenge, which works even without a public username).
+    # Fall back to username comparison for the plain "@username" path, and
+    # guard against user.username being None (not everyone sets one).
+    opponent_id = pending.get('opponent_id')
+    opponent_username = pending.get('opponent_username')
+
+    if opponent_id is not None:
+        is_opponent = (user.id == opponent_id)
+    elif opponent_username is not None:
+        is_opponent = (user.username or "").lower() == opponent_username
+    else:
+        is_opponent = False
+
+    if not is_opponent:
         await query.answer("This challenge isn't for you.")
         return
 
